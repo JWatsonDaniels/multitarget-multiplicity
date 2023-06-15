@@ -1,0 +1,10 @@
+{
+    "n_samples": 300,
+    "data_name": "dissecting_bias_dataset_all_outcomes_ols_friendly_features",
+    "big_m": 10.0,
+    "top_K": 10,
+    "top_K_proportion": 0.1,
+    "DEBUG": true,
+    "random_seed": 109,
+    "obj": "max"
+}

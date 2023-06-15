@@ -1,0 +1,571 @@
+diff --git a/code/model/extract_csvs_and_run_ols.py b/code/model/extract_csvs_and_run_ols.py
+new file mode 100644
+index 0000000..87b9fd1
+--- /dev/null
++++ b/code/model/extract_csvs_and_run_ols.py
+@@ -0,0 +1,224 @@
++"""
++Main script to train lasso model and save predictions.
++"""
++import pandas as pd
++import numpy as np
++import os
++
++import features
++import model
++import util
++
++
++def load_data_df():
++    """Load data dataframe.
++
++    Returns
++    -------
++    pd.DataFrame
++        DataFrame to use for analysis.
++
++    """
++    # define filepath
++    git_dir = util.get_git_dir()
++    data_fp = os.path.join(git_dir, 'data', 'data_new.csv')
++
++    # load df
++    data_df = pd.read_csv(data_fp)
++
++    # because we removed patient
++    data_df = data_df.reset_index()
++    return data_df
++
++
++def get_Y_x_df(df, verbose):
++    """Get dataframe with relevant x and Y columns.
++
++    Parameters
++    ----------
++    df : pd.DataFrame
++        Data dataframe.
++    verbose : bool
++        Print statistics of features.
++
++    Returns
++    -------
++    all_Y_x_df : pd.DataFrame
++        Dataframe with x (features) and y (labels) columns
++    x_column_names : list
++        List of all x column names (features).
++    Y_predictors : list
++        All labels (Y) to predict.
++
++    """
++    # cohort columns
++    cohort_cols = ['index']
++
++    # features (x)
++    x_column_names = features.get_all_features(df, verbose)
++
++    # include log columns
++    df['log_cost_t'] = util.convert_to_log(df, 'cost_t')
++    df['log_cost_avoidable_t'] = util.convert_to_log(df, 'cost_avoidable_t')
++
++    # labels (Y) to predict
++    Y_predictors = ['log_cost_t', 'gagne_sum_t', 'log_cost_avoidable_t']
++
++    # redefine 'race' variable as indicator
++    df['dem_race_black'] = np.where(df['race'] == 'black', 1, 0)
++
++    # additional metrics used for table 2 and table 3
++    table_metrics = ['dem_race_black', 'risk_score_t', 'program_enrolled_t',
++                     'cost_t', 'cost_avoidable_t']
++
++    # combine all features together -- this forms the Y_x df
++    all_Y_x_df = df[cohort_cols + x_column_names + Y_predictors + table_metrics].copy()
++
++    return all_Y_x_df, x_column_names, Y_predictors
++
++
++def main():
++    # load data
++    data_df = load_data_df()
++
++    # subset to relevant columns
++    all_Y_x_df, x_column_names, Y_predictors = get_Y_x_df(data_df, verbose=True)
++
++    # assign to 2/3 train, 1/3 holdout
++    all_Y_x_df = model.split_by_id(all_Y_x_df, id_field='index',
++                                   frac_train=.67)
++
++    # define train, holdout
++    # reset_index for pd.concat() along column
++    train_df = all_Y_x_df[all_Y_x_df['split'] == 'train'].reset_index(drop=True)
++    holdout_df = all_Y_x_df[all_Y_x_df['split'] == 'holdout'].reset_index(drop=True)
++
++    # define output dir to save modified datasets to
++    # and save entire dataset with all outcomes and features to a csv
++    git_dir = util.get_git_dir()
++    OUTPUT_DIR = util.create_dir(os.path.join(git_dir, 'data'))
++    all_Y_x_df.to_csv(os.path.join(OUTPUT_DIR, 'dissecting_bias_dataset_all_outcomes_and_features.csv'), index=False)
++
++    # make one version of the dataset that has only three outcomes, the original train/holdout split, and two dozen features
++    columns_to_include = '(log_cost_t|log_cost_avoidable_t|gagne_sum_t|split|gagne_sum_tm1|hypertension_elixhauser_tm1|^dem_|cost.*tm1)'
++    all_Y_x_df_small =  all_Y_x_df.filter(regex=columns_to_include)
++    all_Y_x_df_small.to_csv(os.path.join(OUTPUT_DIR, 'dissecting_bias_dataset_three_outcomes_limited_features_train_and_holdout.csv'), index=False)
++
++    # make another version that's OLS friendly by removing co-linear features
++    # columns to exclude for switch from lasso to regular OLS
++    # note that we also don't want to use (risk_score_t|program_enrolled_t) in the regressions
++    # but we leave them in here because they're used in other bits of the script that follow
++    columns_to_exclude = '(gagne_sum_tm1|normal_tm1|esr_.*-low_tm1|crp_(min|mean|max).*_tm1|ghba1c_.*-low_tm1)'
++    print(all_Y_x_df.shape)
++    all_Y_x_df = all_Y_x_df[all_Y_x_df.columns.drop(list(all_Y_x_df.filter(regex=columns_to_exclude)))]
++    print(all_Y_x_df.shape)
++    all_Y_x_df.to_csv(os.path.join(OUTPUT_DIR, 'dissecting_bias_dataset_all_outcomes_ols_friendly_features.csv'), index=False)
++
++    # define output dir to save results
++    git_dir = util.get_git_dir()
++    OUTPUT_DIR = util.create_dir(os.path.join(git_dir, 'results'))
++
++    # define parameters
++    include_race = False
++    n_folds = 2
++    save_plot = False
++    save_r2 = True
++
++    # train model with Y = 'log_cost_t'
++    log_cost_r2_df, \
++    pred_log_cost_df, \
++    log_cost_lasso_coef_df = model.train_ols(train_df,
++                                               holdout_df,
++                                               x_column_names,
++                                               y_col='log_cost_t',
++                                               outcomes=Y_predictors,
++                                               n_folds=n_folds,
++                                               include_race=include_race,
++                                               plot=save_plot,
++                                               output_dir=OUTPUT_DIR)
++
++    # train model with Y = 'gagne_sum_t'
++    gagne_sum_t_r2_df, \
++    pred_gagne_sum_t_df, \
++    gagne_sum_t_lasso_coef_df = model.train_ols(train_df,
++                                                  holdout_df,
++                                                  x_column_names,
++                                                  y_col='gagne_sum_t',
++                                                  outcomes=Y_predictors,
++                                                  n_folds=n_folds,
++                                                  include_race=include_race,
++                                                  plot=save_plot,
++                                                  output_dir=OUTPUT_DIR)
++
++    # train model with Y = 'log_cost_avoidable_t'
++    log_cost_avoidable_r2_df, \
++    pred_log_cost_avoidable_df, \
++    log_cost_avoidable_lasso_coef_df = model.train_ols(train_df,
++                                                         holdout_df,
++                                                         x_column_names,
++                                                         y_col='log_cost_avoidable_t',
++                                                         outcomes=Y_predictors,
++                                                         n_folds=n_folds,
++                                                         include_race=include_race,
++                                                         plot=save_plot,
++                                                         output_dir=OUTPUT_DIR)
++
++    if save_r2:
++        formulas = model.build_formulas('risk_score_t', outcomes=Y_predictors)
++        risk_score_r2_df = model.get_r2_df(holdout_df, formulas)
++
++        r2_df = pd.concat([risk_score_r2_df,
++                           log_cost_r2_df,
++                           gagne_sum_t_r2_df,
++                           log_cost_avoidable_r2_df])
++
++        # save r2 file CSV
++        if include_race:
++            filename = 'model_ols_r2_race.csv'
++        else:
++            filename = 'model_ols_r2.csv'
++        output_filepath = os.path.join(OUTPUT_DIR, filename)
++        print('...writing to {}'.format(output_filepath))
++        r2_df.to_csv(output_filepath, index=False)
++
++    def get_split_predictions(df, split):
++        pred_split_df = df[df['split'] == split]
++        pred_split_df = pred_split_df.drop(columns=['split'])
++        return pred_split_df
++
++    # get holdout predictions
++    holdout_log_cost_df = get_split_predictions(pred_log_cost_df,
++                                                split='holdout')
++    holdout_gagne_sum_t_df = get_split_predictions(pred_gagne_sum_t_df,
++                                                   split='holdout')
++    holdout_log_cost_avoidable_df = get_split_predictions(pred_log_cost_avoidable_df,
++                                                          split='holdout')
++
++    holdout_pred_df = pd.concat([holdout_df, holdout_log_cost_df,
++                                 holdout_gagne_sum_t_df,
++                                 holdout_log_cost_avoidable_df], axis=1)
++
++    holdout_pred_df_subset = holdout_pred_df[['index', 'dem_race_black',
++                                              'risk_score_t', 'gagne_sum_t',
++                                              'cost_t', 'cost_avoidable_t',
++                                              'program_enrolled_t',
++                                              'log_cost_t_hat',
++                                              'gagne_sum_t_hat',
++                                              'log_cost_avoidable_t_hat']].copy()
++
++    # add risk_score_percentile column
++    holdout_pred_df_subset['risk_score_t_percentile'] = \
++        util.convert_to_percentile(holdout_pred_df_subset, 'risk_score_t')
++
++    # save to CSV
++    if include_race:
++        filename = 'model_ols_predictors_race.csv'
++    else:
++        filename = 'model_ols_predictors.csv'
++    output_filepath = os.path.join(OUTPUT_DIR, filename)
++    print('...HOLDOUT PREDICTIONS saved to {}'.format(output_filepath))
++    holdout_pred_df_subset.to_csv(output_filepath, index=False)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/code/model/model.py b/code/model/model.py
+index 4348e85..c1688fd 100644
+--- a/code/model/model.py
++++ b/code/model/model.py
+@@ -296,3 +296,130 @@ def train_lasso(train_df, holdout_df,
+     r2_df = get_r2_df(holdout_Y_pred, formulas)
+ 
+     return r2_df, pred_df, lasso_coef_df
++
++def train_ols(train_df, holdout_df,
++                x_column_names,
++                y_col,
++                outcomes,
++                n_folds=10,
++                include_race=False,
++                plot=False,
++                output_dir=None):
++    """Train OLS model and get predictions for holdout.
++
++    Parameters
++    ----------
++    train_df : pd.DataFrame
++        Train dataframe.
++    holdout_df : pd.DataFrame
++        Holdout dataframe.
++    x_column_names : list
++        List of column names to use as features.
++    y_col : str
++        Name of y column (label) to predict.
++    outcomes : list
++        All labels (Y) to predict.
++    n_folds : int
++        Number of folds for cross validation.
++    include_race : bool
++        Whether to include the race variable as a feature (X).
++    plot : bool
++        Whether to save the mean square error (MSE) plots.
++    output_dir : str
++        Path where to save results.
++
++    Returns
++    -------
++    r2_df : pd.DataFrame
++        DataFrame of formula (y ~ x), holdout_r2, holdout_obs.
++    pred_df : pd.DataFrame
++        DataFrame of all predictions (train and holdout).
++    ols_coef_df : pd.DataFrame
++        DataFrame of ols coefficients.
++
++    """
++    if not include_race:
++        # remove the race variable
++        x_cols = [x for x in x_column_names if x != 'race']
++    else:
++        # include the race variable
++        if 'race' not in x_column_names:
++            x_cols = x_column_names + ['race']
++        else:
++            x_cols = x_column_names
++
++    # split X and y
++    train_X = train_df[x_cols]
++    train_y = train_df[y_col]
++
++    # define cross validation (CV) generator
++    # separate at the patient level
++    from sklearn.model_selection import GroupKFold
++    group_kfold = GroupKFold(n_splits=n_folds)
++    # for the synthetic data, we split at the observation level ('index')
++    group_kfold_generator = group_kfold.split(train_X, train_y,
++                                              groups=train_df['index'])
++    # train ols model
++    from sklearn.linear_model import LinearRegression
++    ols = LinearRegression(fit_intercept = True,
++                           normalize = True)
++    ols.fit(train_X, train_y)
++    train_r2 = ols.score(train_X, train_y)
++    train_nobs = len(train_X)
++
++    # ols coefficients
++    coef_col_name = '{}_race_coef'.format(y_col) if include_race else '{}_coef'.format(y_col)
++    ols_coef_df = pd.DataFrame({'{}_coef'.format(y_col): ols.coef_}, index=train_X.columns)
++
++    # number of ols features
++    original_features = len(x_cols)
++    n_features = len(ols_coef_df)
++
++    def predictions_df(x_vals, y_col, split):
++        """Short summary.
++
++        Parameters
++        ----------
++        x_vals : pd.DataFrame
++            DataFrame of all X values.
++        y_col : str
++            Name of y column (label) to predict.
++        split : str
++            Name of split (e.g. 'holdout').
++
++        Returns
++        -------
++        pd.DataFrame
++            DataFrame with 'y_hat' (prediction), 'y_hat_percentile', 'split'
++
++        """
++        y_hat = ols.predict(x_vals)
++        y_hat_col = '{}_hat'.format(y_col)
++        y_hat_df = pd.DataFrame(y_hat, columns=[y_hat_col])
++        y_hat_percentile = util.convert_to_percentile(y_hat_df, y_hat_col)
++
++        # include column for y_hat percentile
++        y_hat_percentile_df = pd.DataFrame(y_hat_percentile)
++        y_hat_percentile_df.columns = ['{}_hat_percentile'.format(y_col)]
++
++        pred_df = pd.concat([y_hat_df, y_hat_percentile_df], axis=1)
++        pred_df['split'] = split
++
++        return pred_df
++
++    # predict in train
++    train_df_pred = predictions_df(train_X, y_col, 'train')
++
++    # predict in holdout
++    holdout_X = holdout_df[x_cols]
++    holdout_df_pred = predictions_df(holdout_X, y_col, 'holdout')
++
++    # predictions
++    pred_df = pd.concat([train_df_pred, holdout_df_pred])
++
++    # r2
++    holdout_Y_pred = pd.concat([holdout_df[outcomes], holdout_df_pred], axis=1)
++    formulas = build_formulas(y_col, outcomes)
++    r2_df = get_r2_df(holdout_Y_pred, formulas)
++
++    return r2_df, pred_df, ols_coef_df
+\ No newline at end of file
+diff --git a/code/table2_index_model.py b/code/table2_index_model.py
+new file mode 100644
+index 0000000..12bf7cb
+--- /dev/null
++++ b/code/table2_index_model.py
+@@ -0,0 +1,199 @@
++"""
++Build Table 2: performance of predictors trained on alternative labels.
++"""
++import pandas as pd
++import os
++import model.util as util
++
++
++def get_concentration_metric_df(k, holdout_pred_df,
++                                y_predictors=['log_cost_t',
++                                              'log_cost_avoidable_t',
++                                              'gagne_sum_t',
++                                              'index_model_t'],
++                                outcomes=['log_cost_t', 'log_cost_avoidable_t',
++                                          'gagne_sum_t', 'dem_race_black']):
++    """Calculate concentration of a given outcome of interest (columns) for
++    each algorithm trained label, and calculate fraction black in the high-risk
++    patient group.
++
++    Parameters
++    ----------
++    k : float
++        Top k% patients in terms of predicted risk.
++    holdout_pred_df : pd.DataFrame
++        Predictions for holdout set.
++    y_predictors : list
++        List of algorithm training label.
++    outcomes : list
++        List of given outcome of interest.
++
++    Returns
++    -------
++    pd.DataFrame
++        Concentration metric for holdout_pred_df.
++    """
++    # define lookup for human readable headings in Table 2
++    OUTCOME_DICT = {
++        'cost_t': 'Total costs',
++        'log_cost_t': 'Total costs',
++        'cost_avoidable_t': 'Avoidable costs',
++        'log_cost_avoidable_t': 'Avoidable costs',
++        'gagne_sum_t': 'Active chronic conditions',
++        'index_model_t': 'Index model',
++        'dem_race_black': 'Race black'
++    }
++
++    top_k = int(k * len(holdout_pred_df))
++    all_concentration_metric = []  # save all rows of Table 2 to variable
++
++    # iterate through each predictor (algorithm training label)
++    # (this is each row in Table 2)
++    for y_col in y_predictors:
++        # get the predictions column name for y_col
++        y_hat_col = '{}_hat'.format(y_col)
++
++        # sort by y_hat_col
++        holdout_pred_df = holdout_pred_df.sort_values(by=y_hat_col, ascending=False)
++        # get top k% in terms of predicted risk
++        top_k_df = holdout_pred_df.iloc[:top_k]
++
++        # define dict to store calculated metrics for given y_col/predictor
++        # (each addition to the dict appends a column from Table 2)
++        concentration_dict = {
++            'predictor': OUTCOME_DICT[y_col]
++        }
++
++        # iterate through each outcome
++        # (concentration / frac black in highest-risk patients)
++        # (this is each column in Table 2)
++        for outcome in outcomes:
++            if 'log_' in outcome:
++                # for the outcomes presented on a log scale,
++                # we sum the un-logged values.
++                outcome = outcome[len('log_'):]
++
++            # define numerator of concentration metric:
++            # sum the top k of outcome
++            top_k_outcome = top_k_df[outcome].sum()
++
++            # define denominator of concentration metric
++            if outcome == 'dem_race_black':
++                # for fraction black in highest-risk patients,
++                # denominator is the n of top k%
++                total_outcome = top_k
++            else:
++                # for concentration in highest-risk patients,
++                # denominator is the total sum of the entire holdout
++                total_outcome = holdout_pred_df[outcome].sum()
++
++            # calculate concentration metric
++            frac_top_k = top_k_outcome / total_outcome
++
++            # add column to concentration_dict (row)
++            concentration_dict[OUTCOME_DICT[outcome]] = frac_top_k
++
++            # calculate standard error (SE)
++            n = len(holdout_pred_df)
++            import math
++            # SE = sqrt[ p * (1-p) / n]
++            se = math.sqrt((frac_top_k * (1-frac_top_k))/n)
++
++            # add SE column to concentration_dict (row)
++            concentration_dict[OUTCOME_DICT[outcome] + ' SE'] = se
++        all_concentration_metric.append(concentration_dict)
++
++    # convert to pd.DataFrame for pretty formatting
++    concentration_df = pd.DataFrame(all_concentration_metric)
++    concentration_df = concentration_df.set_index('predictor')
++
++    # define column order of Table 2
++    column_order = []
++    for outcome in outcomes:
++        outcome = OUTCOME_DICT[outcome]
++        column_order.append(outcome)
++        column_order.append(outcome + ' SE')
++
++    return concentration_df[column_order]
++
++
++def get_best_worst_difference(df):
++    """Calculate difference between best and worst for each
++    outcome of interest.
++
++    Parameters
++    ----------
++    df : pd.DataFrame
++        Concentration metric df.
++
++    Returns
++    -------
++    pd.DataFrame
++        Table 2 for df.
++
++    """
++    # define dict to store 'Best-worst difference' metric for given outcome
++    # (final row in Table 2)
++    best_worst_dict = {
++        'predictor': 'Best-worst difference'
++    }
++
++    # for each concentration of a given outcome of interest (columns),
++    # calculate best - worst (same as max - min)
++    for col in df.columns:
++        # skip SE columns
++        if 'SE' == col[-2:]:
++            continue
++
++        # calculate best - worst
++        max = df[col].max()
++        min = df[col].min()
++        diff = max - min
++
++        # add best - worst calculate to best_worst_dict (row)
++        best_worst_dict[col] = diff
++
++    # convert to pd.DataFrame for pretty formatting
++    best_worst_row = pd.DataFrame(best_worst_dict, index=[0]).set_index('predictor')
++    return best_worst_row
++
++
++def build_table2(k=0.03):
++    """Build Table 2 and save as CSV.
++
++    Parameters
++    ----------
++    k : float
++        Top k% patients in terms of predicted risk.
++
++    Returns
++    -------
++    pd.DataFrame
++        Table 2.
++    """
++    # define output dir
++    git_dir = util.get_git_dir()
++    OUTPUT_DIR = util.create_dir(os.path.join(git_dir, 'results'))
++
++    # load holdout predictions generated from model
++    holdout_pred_fp = os.path.join(OUTPUT_DIR, 'maximize_index_model_results.csv')
++    holdout_pred_df = pd.read_csv(holdout_pred_fp)
++
++    # calculate algorithm performance on alternative labels
++    concentration_df = get_concentration_metric_df(k, holdout_pred_df)
++    # calculate best - worst
++    best_worst_row = get_best_worst_difference(concentration_df)
++
++    # combine all rows to build our Table 2
++    table2 = pd.concat([concentration_df, best_worst_row], sort=False)
++
++    # save output to CSV
++    filename = 'dissecting_bias_index_model_concentration_metric.csv'
++    output_filepath = os.path.join(OUTPUT_DIR, filename)
++    print('...writing to {}'.format(output_filepath))
++    table2.to_csv(output_filepath, index=True)
++
++    return table2
++
++if __name__ == '__main__':
++    build_table2(k=0.03)

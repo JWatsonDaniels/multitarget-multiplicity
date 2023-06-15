@@ -1,0 +1,10 @@
+{
+    "n_samples": 300,
+    "data_name": "dissecting_bias_dataset_semisynthetic_b=",
+    "big_m": 10.0,
+    "top_K": 10,
+    "top_K_proportion": 0.1,
+    "DEBUG": true,
+    "random_seed": 109,
+    "obj": "max"
+}
